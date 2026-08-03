@@ -33,3 +33,4 @@ Next steps I can do for you:
 - Add paging, caching, and better error handling.
 - Integrate advanced player controls (seek bar, progress indicator, background audio, remote controls).
 # Vibee
+# Vibee-app
