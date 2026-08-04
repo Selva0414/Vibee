@@ -895,11 +895,20 @@ export default function App() {
       setSections(initialSections);
       setLoading(false); // UI is now interactive!
 
-      // --- STAGE 2: Background Loading (AI-based) ---
+      // --- STAGE 2: Background Loading (Last.fm-based) ---
       const loadSectionAI = async (vibe, key) => {
         try {
-          const promptText = `10 ${vibe} songs`;
-          const songNames = await GeminiService.getSongRecommendations(promptText, lValue);
+          // Fetch top tracks for the mood using Last.fm tags
+          // We combine language and vibe as a tag, or fallback to just vibe
+          const LASTFM_API_KEY = 'ac09a781b56b0af27edd7961a6b67d8b';
+          const lastFmUrl = `https://ws.audioscrobbler.com/2.0/?method=tag.gettoptracks&tag=${encodeURIComponent(vibe)}&api_key=${LASTFM_API_KEY}&format=json&limit=15`;
+          
+          const lastfmData = await fetchJsonWithRetry(lastFmUrl, { retries: 1, timeoutMs: 5000 }).catch(() => null);
+          
+          let songNames = [];
+          if (lastfmData?.tracks?.track) {
+            songNames = lastfmData.tracks.track.map(t => `${t.name} ${t.artist.name}`);
+          }
 
           if (songNames && songNames.length > 0) {
             const results = [];
