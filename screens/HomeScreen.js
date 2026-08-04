@@ -1,11 +1,12 @@
 import React, { memo, useState, useEffect } from 'react';
 import { View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ScrollView, Dimensions, Platform, Modal, ActivityIndicator } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Icon from '../components/Icon';
 import GenreCard from '../components/GenreCard';
 import SongItem from '../components/SongItem';
 
 const { width } = Dimensions.get('window');
-const BACKEND_URL = 'http://localhost:5000'; // Or your deployed backend URL
+const BACKEND_URL = 'https://vibee-hx18.onrender.com'; // Or your deployed backend URL
 
 const SongRecommendations = memo(({ currentTrack, onTrackSelect }) => {
     const [recommendations, setRecommendations] = useState([]);
@@ -225,6 +226,18 @@ export default memo(function HomeScreen({
     onLogout
 }) {
     const [menuVisible, setMenuVisible] = useState(false);
+    const [profileVisible, setProfileVisible] = useState(false);
+    const [userInfo, setUserInfo] = useState(null);
+
+    useEffect(() => {
+        const fetchUser = async () => {
+            try {
+                const info = await AsyncStorage.getItem('@user_info');
+                if (info) setUserInfo(JSON.parse(info));
+            } catch (e) { console.log('Error fetching user info', e); }
+        };
+        fetchUser();
+    }, []);
 
     const renderLoading = () => (
         <View style={styles.container}>
@@ -312,13 +325,51 @@ export default memo(function HomeScreen({
             <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
                 <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenuVisible(false)}>
                     <View style={{ position: 'absolute', top: 60, right: 20, backgroundColor: '#1E1E1E', borderRadius: 8, padding: 8, elevation: 5, width: 150, zIndex: 100 }}>
-                        <TouchableOpacity style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: '#333' }}>
+                        <TouchableOpacity 
+                            style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: '#333' }}
+                            onPress={() => { setMenuVisible(false); setProfileVisible(true); }}
+                        >
                             <Text style={{ color: '#FFF', fontSize: 16 }}>Profile</Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={{ padding: 12 }} onPress={() => { setMenuVisible(false); if(onLogout) onLogout(); }}>
                             <Text style={{ color: '#FF3B30', fontSize: 16 }}>Log out</Text>
                         </TouchableOpacity>
                     </View>
+                </TouchableOpacity>
+            </Modal>
+
+            {/* Profile Modal */}
+            <Modal visible={profileVisible} animationType="fade" transparent onRequestClose={() => setProfileVisible(false)}>
+                <TouchableOpacity 
+                    style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center' }} 
+                    activeOpacity={1} 
+                    onPress={() => setProfileVisible(false)}
+                >
+                    <TouchableOpacity 
+                        activeOpacity={1} 
+                        style={{ width: '85%', backgroundColor: '#1E1E1E', borderRadius: 20, padding: 24, alignItems: 'center', elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 }}
+                    >
+                        <TouchableOpacity onPress={() => setProfileVisible(false)} style={{ position: 'absolute', top: 16, right: 16, padding: 4 }}>
+                            <Icon name="close" size={24} color="#9CA3AF" />
+                        </TouchableOpacity>
+
+                        <Image 
+                            source={{ uri: userInfo?.profilePhoto || 'https://ui-avatars.com/api/?name=' + (userInfo?.name || 'User') + '&background=9B5DE5&color=fff&size=128' }} 
+                            style={{ width: 100, height: 100, borderRadius: 50, marginBottom: 24, borderWidth: 2, borderColor: '#9B5DE5' }} 
+                        />
+                        
+                        <View style={{ width: '100%', paddingHorizontal: 10 }}>
+                            <Text style={{ color: '#9B5DE5', fontSize: 12, textTransform: 'uppercase', fontWeight: 'bold', marginBottom: 4, letterSpacing: 1 }}>Name</Text>
+                            <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '600', marginBottom: 16 }}>
+                                {userInfo?.name || 'User'}
+                            </Text>
+
+                            <Text style={{ color: '#9B5DE5', fontSize: 12, textTransform: 'uppercase', fontWeight: 'bold', marginBottom: 4, letterSpacing: 1 }}>Email</Text>
+                            <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '600' }}>
+                                {userInfo?.email || 'No email provided'}
+                            </Text>
+                        </View>
+                    </TouchableOpacity>
                 </TouchableOpacity>
             </Modal>
 

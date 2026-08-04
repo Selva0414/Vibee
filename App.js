@@ -452,7 +452,7 @@ export default function App() {
 
         // 1. Parallelize local data loading for speed
         // TrackPlayer setup is robust enough to run alongside AsyncStorage
-        const [savedLang, userToken] = await Promise.all([
+        const [savedLang, , , , , userToken] = await Promise.all([
           loadLiked(),
           loadPlaylists(),
           loadDownloadData(),
@@ -501,7 +501,7 @@ export default function App() {
       if (stored) {
         setLikedSongs(JSON.parse(stored));
       }
-      
+
       const recent = await AsyncStorage.getItem('recentSongs');
       if (recent) {
         setRecentSongs(JSON.parse(recent));
@@ -902,9 +902,9 @@ export default function App() {
           // We combine language and vibe as a tag, or fallback to just vibe
           const LASTFM_API_KEY = 'ac09a781b56b0af27edd7961a6b67d8b';
           const lastFmUrl = `https://ws.audioscrobbler.com/2.0/?method=tag.gettoptracks&tag=${encodeURIComponent(vibe)}&api_key=${LASTFM_API_KEY}&format=json&limit=15`;
-          
+
           const lastfmData = await fetchJsonWithRetry(lastFmUrl, { retries: 1, timeoutMs: 5000 }).catch(() => null);
-          
+
           let songNames = [];
           if (lastfmData?.tracks?.track) {
             songNames = lastfmData.tracks.track.map(t => `${t.name} ${t.artist.name}`);
@@ -1515,7 +1515,7 @@ export default function App() {
     // Try Last.fm Recommendations first
     try {
       const artistName = currentSongRef.current.artist || currentSongRef.current.artists?.primary?.[0]?.name || 'Unknown Artist';
-      const lastfmRes = await fetchJsonWithRetry(`http://localhost:5000/api/recommendations/lastfm?track=${encodeURIComponent(currentSongRef.current.name)}&artist=${encodeURIComponent(artistName)}`, { retries: 1 });
+      const lastfmRes = await fetchJsonWithRetry(`https://vibee-hx18.onrender.com/api/recommendations/lastfm?track=${encodeURIComponent(currentSongRef.current.name)}&artist=${encodeURIComponent(artistName)}`, { retries: 1 });
 
       if (lastfmRes && lastfmRes.length > 0) {
         const queue = await TrackPlayer.getQueue();
@@ -1706,7 +1706,7 @@ export default function App() {
       const dateObj = new Date();
       // Format as DD MM YYYY (e.g. 13 03 2026)
       const formattedDate = `${String(dateObj.getDate()).padStart(2, '0')} ${String(dateObj.getMonth() + 1).padStart(2, '0')} ${dateObj.getFullYear()}`;
-      
+
       const newRecentSong = {
         ...song,
         playedAt: formattedDate
@@ -1716,11 +1716,11 @@ export default function App() {
         // Remove duplicates of the same song ID
         const filtered = prev.filter(s => s.id !== song.id);
         const updated = [newRecentSong, ...filtered].slice(0, 30); // Keep last 30
-        AsyncStorage.setItem('recentSongs', JSON.stringify(updated)).catch(() => {});
+        AsyncStorage.setItem('recentSongs', JSON.stringify(updated)).catch(() => { });
         return updated;
       });
       // -----------------------------
-      
+
       // Silent Preload for Radio Mode
       if (!playlist || playlist.length === 0 || context !== 'playlist') {
         handleInfiniteAutoplay(true);
@@ -2039,7 +2039,7 @@ export default function App() {
     // Logic matching the coreQueries
     switch (title) {
       case "Trending Songs": query = `${l} trending songs 2026`; break;
-      case "Chill Songs": query = `${l} songs 2020,2019,2018,2017,2016`; break;
+      case "Chill Songs": query = `${l} trending songs 2019,2018,2017,2020,2021,2022,`; break;
       case "Love Songs": query = `${l} songs 2015,2014,2013,2012,2011`; break;
       case "Melody Songs": query = `${l} songs 2010,2009,2008,2007,2006`; break;
       case "Songs for You": query = `${l} popular songs`; break;

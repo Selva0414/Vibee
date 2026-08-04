@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Icon from '../components/Icon';
 
 // Use appropriate local IP or deployed backend URL
-const BACKEND_URL = 'http://localhost:5000/api/auth'; 
+const BACKEND_URL = 'https://vibee-hx18.onrender.com/api/auth'; 
 // NOTE: 192.168.1.100 is just an example. Please replace it with the exact IPv4 of your machine if running on a physical device, or localhost if on web/emulator.
 
 export default function LoginScreen({ onLoginSuccess, onNavigateToSignup }) {
