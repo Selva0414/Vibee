@@ -3,6 +3,7 @@ import { View, Text, Image, TouchableOpacity, StyleSheet, Modal, Dimensions, Scr
 import { BlurView } from 'expo-blur';
 import Icon from './Icon';
 import Slider from '@react-native-community/slider';
+import TrackPlayer, { Event, useTrackPlayerEvents } from 'react-native-track-player';
 
 const { width, height } = Dimensions.get('window');
 
@@ -58,6 +59,35 @@ export default function FullScreenPlayer({
 
     // Using a ref for the animation value
     const fadeAnim = useState(new Animated.Value(0))[0];
+
+    const [queue, setQueue] = useState([]);
+    const [currentIndex, setCurrentIndex] = useState(0);
+
+    const fetchQueue = async () => {
+        try {
+            const q = await TrackPlayer.getQueue();
+            const idx = await TrackPlayer.getActiveTrackIndex();
+            setQueue(q || []);
+            setCurrentIndex(idx || 0);
+        } catch (e) {}
+    };
+
+    useEffect(() => {
+        if (visible) {
+            fetchQueue();
+        }
+    }, [visible]);
+
+    useTrackPlayerEvents([Event.PlaybackTrackChanged, Event.PlaybackQueueEnded], async () => {
+        fetchQueue();
+    });
+
+    const skipToQueueItem = async (index) => {
+        try {
+            await TrackPlayer.skip(index);
+            await TrackPlayer.play();
+        } catch (e) {}
+    };
 
     useEffect(() => {
         if (!visible) {
@@ -179,8 +209,19 @@ export default function FullScreenPlayer({
                 </View>
 
                 {/* Main View or Lyrics View */}
-                {!lyricsVisible ? (
+                {lyricsVisible ? (
                     <View style={{ flex: 1 }}>
+                        <View style={styles.lyricsMainContainer}>
+                            <LyricsView
+                                lyrics={lyrics}
+                                position={playbackStatus.position}
+                                isLoading={loadingLyrics}
+                            />
+                        </View>
+                    </View>
+                ) : (
+                    <ScrollView contentContainerStyle={{ flexGrow: 1 }} showsVerticalScrollIndicator={false}>
+                        <View style={{ minHeight: height - 100, paddingBottom: 20 }}>
                         {/* Album Art - Tappable for Lyrics */}
                         <TouchableOpacity
                             style={styles.artContainer}
@@ -254,84 +295,30 @@ export default function FullScreenPlayer({
                                 <Icon name="repeat" size={24} color={isRepeat ? "#9B5DE5" : "#B3B3B3"} />
                             </TouchableOpacity>
                         </View>
-                    </View>
-                ) : (
-                    <View style={{ flex: 1 }}>
-                        {/* Lyrics Display Area */}
-                        <View style={styles.lyricsMainContainer}>
-                            {/* Header removed as requested, now using main header */}
-
-                            <LyricsView
-                                lyrics={lyrics}
-                                position={playbackStatus.position}
-                                isLoading={loadingLyrics}
-                            />
                         </View>
-                        {/* Glassy Mini Player at Bottom of Lyrics */}
-                        <BlurView intensity={80} tint="dark" style={styles.miniPlayerGlassContainer}>
-                            <View style={styles.miniPlayerInner}>
-                                {/* Song Info */}
-                                <View style={styles.miniPlayerInfo}>
-                                    <Image
-                                        source={{ uri: song.image?.[1]?.url || song.image }}
-                                        style={styles.miniPlayerArt}
-                                    />
-                                    <View style={{ flex: 1, marginLeft: 12 }}>
-                                        <Text style={styles.miniPlayerTitle} numberOfLines={1}>{song.name}</Text>
-                                        <Text style={styles.miniPlayerArtist} numberOfLines={1}>
-                                            {song.artists?.primary?.[0]?.name}
-                                        </Text>
-                                    </View>
-                                    <TouchableOpacity onPress={() => onLike && onLike(song)} style={{ padding: 8 }}>
-                                        <Icon name={isLiked ? "favorite" : "favorite-border"} size={24} color={isLiked ? "#9B5DE5" : "#FFF"} />
-                                    </TouchableOpacity>
-                                </View>
 
-                                {/* Progress Bar */}
-                                <View style={styles.miniProgressContainer}>
-                                    <Slider
-                                        style={{ width: '100%', height: 20 }}
-                                        minimumValue={0}
-                                        maximumValue={1}
-                                        value={currentProgress}
-                                        minimumTrackTintColor="#9B5DE5"
-                                        maximumTrackTintColor="rgba(255,255,255,0.2)"
-                                        thumbTintColor="#9B5DE5"
-                                        onSlidingStart={handleSlidingStart}
-                                        onSlidingComplete={handleSlidingComplete}
-                                        onValueChange={(val) => setLocalProgress(val)}
-                                    />
-                                </View>
-
-                                {/* Mini Controls */}
-                                <View style={styles.miniControls}>
-                                    <TouchableOpacity onPress={onToggleShuffle}>
-                                        <Icon name="shuffle" size={20} color={isShuffle ? "#9B5DE5" : "#B3B3B3"} />
+                        {/* Up Next Section */}
+                        <View style={styles.upNextContainer}>
+                        <Text style={styles.upNextHeader}>Up Next</Text>
+                        {queue.length > currentIndex + 1 ? (
+                            queue.map((item, index) => {
+                                if (index <= currentIndex) return null;
+                                return (
+                                    <TouchableOpacity key={index} style={styles.upNextItem} onPress={() => skipToQueueItem(index)}>
+                                        <Image source={{ uri: item.artwork || item.image?.[0]?.url || 'https://via.placeholder.com/50' }} style={styles.upNextArt} />
+                                        <View style={styles.upNextInfo}>
+                                            <Text style={styles.upNextTitle} numberOfLines={1}>{item.title || item.name}</Text>
+                                            <Text style={styles.upNextArtist} numberOfLines={1}>{item.artist}</Text>
+                                        </View>
+                                        <Icon name="play-arrow" size={24} color="#FFF" />
                                     </TouchableOpacity>
-
-                                    <TouchableOpacity onPress={onPrev}>
-                                        <Icon name="skip-previous" size={32} color="#FFF" />
-                                    </TouchableOpacity>
-
-                                    <TouchableOpacity onPress={onPlayPause} style={styles.miniPlayBtn}>
-                                        {isStartingPlayback ? (
-                                            <ActivityIndicator size="small" color="#000" />
-                                        ) : (
-                                            <Icon name={isPlaying ? "pause" : "play-arrow"} size={28} color="#000" />
-                                        )}
-                                    </TouchableOpacity>
-
-                                    <TouchableOpacity onPress={onNext}>
-                                        <Icon name="skip-next" size={32} color="#FFF" />
-                                    </TouchableOpacity>
-
-                                    <TouchableOpacity onPress={onToggleRepeat}>
-                                        <Icon name="repeat" size={20} color={isRepeat ? "#9B5DE5" : "#B3B3B3"} />
-                                    </TouchableOpacity>
-                                </View>
-                            </View>
-                        </BlurView>
-                    </View>
+                                );
+                            })
+                        ) : (
+                            <Text style={{ color: '#B3B3B3', marginTop: 10 }}>No upcoming tracks. More songs will load automatically!</Text>
+                        )}
+                        </View>
+                    </ScrollView>
                 )}
 
                 {/* Options Menu Modal */}
@@ -595,6 +582,42 @@ export default function FullScreenPlayer({
     );
 }
 
+// Animated Sync Lyric Line
+const AnimatedLyricLine = ({ item, isActive }) => {
+    const animation = React.useRef(new Animated.Value(isActive ? 1 : 0)).current;
+
+    React.useEffect(() => {
+        Animated.timing(animation, {
+            toValue: isActive ? 1 : 0,
+            duration: 300,
+            useNativeDriver: true, // Ensures 60fps animation without blocking JS thread
+        }).start();
+    }, [isActive]);
+
+    const opacity = animation.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.3, 1]
+    });
+
+    // Optional subtle scale (requires transformOrigin 'left' to look perfect, so we keep it simple and smooth)
+    // By keeping font sizes static, we avoid any layout recalculations that cause scrolling to jitter.
+
+    return (
+        <TouchableOpacity style={styles.lyricLine} activeOpacity={1}>
+            <Animated.Text style={[
+                styles.lyricText,
+                {
+                    opacity,
+                    fontWeight: isActive ? '900' : '700',
+                    color: '#FFFFFF' // Always white, opacity handles the dimming
+                }
+            ]}>
+                {item.text}
+            </Animated.Text>
+        </TouchableOpacity>
+    );
+};
+
 // Synced Lyrics Component
 const LyricsView = ({ lyrics, position, isLoading }) => {
     const [lines, setLines] = useState([]);
@@ -667,9 +690,8 @@ const LyricsView = ({ lyrics, position, isLoading }) => {
                 flatListRef.current.scrollToIndex({
                     index,
                     animated: true,
-                    // viewPosition 0.3 puts it roughly 1/3 down the screen, 
-                    // which is safe from the mini-player at the bottom.
-                    viewPosition: 0.3
+                    // viewPosition 0.5 puts it perfectly in the middle of the screen
+                    viewPosition: 0.5
                 });
             }
         }
@@ -677,7 +699,7 @@ const LyricsView = ({ lyrics, position, isLoading }) => {
 
     if (isLoading && lines.length === 0) {
         return (
-            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingTop: 100 }}>
+            <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
                 <ActivityIndicator size="large" color="#9B5DE5" />
                 <Text style={styles.lyricsLoading}>Looking for lyrics...</Text>
             </View>
@@ -710,32 +732,16 @@ const LyricsView = ({ lyrics, position, isLoading }) => {
                 paddingTop: height * 0.3,
                 paddingBottom: height * 0.6
             }}
-            getItemLayout={(data, index) => ({
-                length: 72,
-                offset: 72 * index,
-                index
-            })}
+            // Removed getItemLayout for dynamic height
             renderItem={({ item, index }) => {
                 const isActive = index === activeIndex;
 
-                return (
-                    <TouchableOpacity
-                        style={[styles.lyricLine, isActive && styles.activeLyricLine]}
-                        activeOpacity={1}
-                    >
-                        <Text style={[
-                            styles.lyricText,
-                            isActive ? styles.activeLyricText : styles.inactiveLyricText
-                        ]}>
-                            {item.text}
-                        </Text>
-                    </TouchableOpacity>
-                );
+                return <AnimatedLyricLine item={item} isActive={isActive} />;
             }}
             onScrollToIndexFailed={info => {
-                flatListRef.current?.scrollToOffset({
-                    offset: 72 * info.index,
-                    animated: true
+                const wait = new Promise(resolve => setTimeout(resolve, 100));
+                wait.then(() => {
+                    flatListRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 });
                 });
             }}
         />
@@ -863,12 +869,13 @@ const styles = StyleSheet.create({
         lineHeight: 38,
         fontWeight: '700',
         textAlign: 'left',
+        letterSpacing: 0.5,
     },
     lyricsLoading: {
         color: '#9B5DE5',
         fontSize: 18,
         textAlign: 'center',
-        marginTop: 100,
+        marginTop: 16,
     },
     // Menu Modal Styles
     menuOverlay: {
@@ -902,31 +909,28 @@ const styles = StyleSheet.create({
     },
     // Synced Lyrics Styles
     lyricLine: {
-        height: 72, // Explicitly match getItemLayout length
+        minHeight: 80, 
         justifyContent: 'center',
         paddingHorizontal: 8,
+        paddingVertical: 12,
         borderRadius: 8,
     },
     activeLyricLine: {
         // backgroundColor: 'rgba(155, 93, 229, 0.1)', // Optional background highlight
     },
     lyricText: {
-        fontSize: 24,
+        fontSize: 28, // Unified static font size
         fontWeight: '700',
-        lineHeight: 38,
-        textAlign: 'left', // Align left for modern look
+        lineHeight: 44,
+        textAlign: 'left',
         paddingHorizontal: 10,
+        letterSpacing: 0.5,
     },
     activeLyricText: {
-        color: '#FFF', // Bright white for active
-        fontSize: 32, // Significantly larger
-        fontWeight: '900',
-        opacity: 1,
+        // Kept for backward compatibility, though AnimatedLyricLine now overrides directly
     },
     inactiveLyricText: {
-        color: 'rgba(255, 255, 255, 0.2)', // Very dim for non-active
-        fontSize: 24,
-        fontWeight: '700',
+        // Kept for backward compatibility
     },
     // Mini Player Styles (Glass Effect)
     miniPlayerGlassContainer: {
@@ -1104,5 +1108,42 @@ const styles = StyleSheet.create({
         flex: 1,
         textAlign: 'right',
         marginLeft: 20,
+    },
+    upNextContainer: {
+        paddingHorizontal: 20,
+        paddingBottom: 40,
+        marginTop: 10,
+    },
+    upNextHeader: {
+        color: '#FFF',
+        fontSize: 18,
+        fontWeight: 'bold',
+        marginBottom: 16,
+    },
+    upNextItem: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingVertical: 12,
+        borderBottomWidth: 1,
+        borderBottomColor: 'rgba(255,255,255,0.05)',
+    },
+    upNextArt: {
+        width: 50,
+        height: 50,
+        borderRadius: 8,
+        marginRight: 16,
+    },
+    upNextInfo: {
+        flex: 1,
+    },
+    upNextTitle: {
+        color: '#FFF',
+        fontSize: 16,
+        fontWeight: '500',
+        marginBottom: 4,
+    },
+    upNextArtist: {
+        color: '#B3B3B3',
+        fontSize: 14,
     }
 });

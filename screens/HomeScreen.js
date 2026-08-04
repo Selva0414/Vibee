@@ -1,10 +1,115 @@
-import React, { memo } from 'react';
-import { View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ScrollView, Dimensions, Platform } from 'react-native';
+import React, { memo, useState, useEffect } from 'react';
+import { View, Text, StyleSheet, FlatList, Image, TouchableOpacity, ScrollView, Dimensions, Platform, Modal, ActivityIndicator } from 'react-native';
 import Icon from '../components/Icon';
 import GenreCard from '../components/GenreCard';
 import SongItem from '../components/SongItem';
 
 const { width } = Dimensions.get('window');
+const BACKEND_URL = 'http://localhost:5000'; // Or your deployed backend URL
+
+const SongRecommendations = memo(({ currentTrack, onTrackSelect }) => {
+    const [recommendations, setRecommendations] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (!currentTrack) return;
+
+        const fetchRecommendations = async () => {
+            setLoading(true);
+            try {
+                // Determine artist name robustly
+                const artistName = currentTrack.artist || currentTrack.artists?.primary?.[0]?.name || 'Unknown Artist';
+                const url = `${BACKEND_URL}/api/recommendations/lastfm?track=${encodeURIComponent(currentTrack.name)}&artist=${encodeURIComponent(artistName)}`;
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error(`HTTP status ${response.status}`);
+                }
+                const data = await response.json();
+                
+                if (Array.isArray(data)) {
+                    // Resolve Last.fm names into real playable songs from our catalog
+                    const realSongsPromises = data.slice(0, 10).map(async (item) => {
+                        try {
+                            const searchUrl = `https://music-api-xandra.vercel.app/api/search/songs?query=${encodeURIComponent(item.name + ' ' + item.artist)}&limit=1`;
+                            const searchRes = await fetch(searchUrl);
+                            const searchData = await searchRes.json();
+                            const rawResult = searchData?.data?.results || searchData?.results || searchData?.data || [];
+                            if (rawResult && rawResult.length > 0) {
+                                return rawResult[0]; // Return the first matched real song
+                            }
+                        } catch (e) {
+                            console.warn("Failed to resolve song:", item.name);
+                        }
+                        return null;
+                    });
+                    
+                    const resolvedSongs = (await Promise.all(realSongsPromises)).filter(Boolean);
+                    
+                    // Format the raw API songs to match the app's structure
+                    const formattedSongs = resolvedSongs.map(song => ({
+                        id: song.id,
+                        name: song.name || song.title,
+                        artist: song.primaryArtists || song.artists?.primary?.[0]?.name || song.subtitle || 'Unknown Artist',
+                        image: song.image,
+                        downloadUrl: song.downloadUrl,
+                        media_url: song.media_url,
+                        duration: song.duration,
+                    }));
+
+                    setRecommendations(formattedSongs);
+                } else {
+                    console.warn("Last.fm returned non-array:", data);
+                    setRecommendations([]);
+                }
+            } catch (error) {
+                console.warn("Error fetching recommendations:", error);
+                setRecommendations([]);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchRecommendations();
+    }, [currentTrack]);
+
+    if (!currentTrack || (recommendations.length === 0 && !loading)) {
+        return null;
+    }
+
+    return (
+        <View style={styles.sectionContainer}>
+            <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Because you listened to {currentTrack.name}</Text>
+            </View>
+            {loading ? (
+                <View style={{ padding: 20, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color="#9B5DE5" />
+                </View>
+            ) : (
+                <FlatList
+                    horizontal
+                    data={recommendations}
+                    keyExtractor={(item, index) => item.name + index}
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.horizontalListContent}
+                    renderItem={({ item }) => (
+                        <TouchableOpacity style={{ width: 140, marginRight: 16 }} onPress={() => {
+                            // Pass the fully resolved real song to the player!
+                            onTrackSelect(item, [item]);
+                        }}>
+                            <Image 
+                                source={{ uri: item.image?.[2]?.url || item.image?.[1]?.url || item.image?.[0]?.url || item.image || 'https://via.placeholder.com/150' }} 
+                                style={{ width: 140, height: 140, borderRadius: 12, marginBottom: 8 }} 
+                            />
+                            <Text style={{ color: '#FFF', fontSize: 14, fontWeight: '600' }} numberOfLines={1}>{item.name}</Text>
+                            <Text style={{ color: '#B3B3B3', fontSize: 12 }} numberOfLines={1}>{item.artist}</Text>
+                        </TouchableOpacity>
+                    )}
+                />
+            )}
+        </View>
+    );
+});
 
 const VerticalSongItem = memo(({ song, isPlaying, isStartingPlayback, startingSongId, onPlay, onLike, isLiked }) => {
     return (
@@ -106,6 +211,7 @@ export default memo(function HomeScreen({
     startingSongId,
     onLike,
     likedSongs,
+    recentSongs,
     sections,
     loading,
     errorText,
@@ -115,8 +221,10 @@ export default memo(function HomeScreen({
     onLanguageSelect,
     artists,
     onArtistSelect,
-    onShowAll
+    onShowAll,
+    onLogout
 }) {
+    const [menuVisible, setMenuVisible] = useState(false);
 
     const renderLoading = () => (
         <View style={styles.container}>
@@ -192,48 +300,34 @@ export default memo(function HomeScreen({
     return (
         <View style={styles.container}>
             {/* Professional Header */}
-            <View style={styles.header}>
+            <View style={[styles.header, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
                 <View style={styles.logoRow}>
                     <Text style={styles.headerTitle}>Vibee</Text>
                 </View>
+                <TouchableOpacity onPress={() => setMenuVisible(true)} style={{ padding: 8 }}>
+                    <Icon name="menu" size={28} color="#FFF" />
+                </TouchableOpacity>
             </View>
 
-            {/* Horizontal Language Pill Menu */}
-            <View style={styles.languageMenuContainer}>
-                <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={false}
-                    contentContainerStyle={styles.languageChipsContent}
-                >
-                    {languages?.map((lang) => {
-                        const isActive = currentLanguage === lang.id;
-                        return (
-                            <TouchableOpacity
-                                key={lang.id}
-                                style={[
-                                    styles.langChip,
-                                    isActive && styles.activeLangChip
-                                ]}
-                                onPress={() => onLanguageSelect(lang.id)}
-                            >
-                                <Text style={[
-                                    styles.langChipText,
-                                    isActive && styles.activeLangChipText
-                                ]}>
-                                    {lang.name}
-                                </Text>
-                            </TouchableOpacity>
-                        );
-                    })}
-                </ScrollView>
-            </View>
+            <Modal visible={menuVisible} transparent animationType="fade" onRequestClose={() => setMenuVisible(false)}>
+                <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMenuVisible(false)}>
+                    <View style={{ position: 'absolute', top: 60, right: 20, backgroundColor: '#1E1E1E', borderRadius: 8, padding: 8, elevation: 5, width: 150, zIndex: 100 }}>
+                        <TouchableOpacity style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: '#333' }}>
+                            <Text style={{ color: '#FFF', fontSize: 16 }}>Profile</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity style={{ padding: 12 }} onPress={() => { setMenuVisible(false); if(onLogout) onLogout(); }}>
+                            <Text style={{ color: '#FF3B30', fontSize: 16 }}>Log out</Text>
+                        </TouchableOpacity>
+                    </View>
+                </TouchableOpacity>
+            </Modal>
 
             <ScrollView
                 style={styles.mainContent}
                 showsVerticalScrollIndicator={false}
                 removeClippedSubviews={Platform.OS !== 'web'}
                 scrollEventThrottle={16}
-                contentContainerStyle={{ paddingBottom: 80 }}
+                contentContainerStyle={{ paddingTop: 16, paddingBottom: 80 }}
             >
                 {/* 1. Trending Songs - Latest movie hits */}
                 <HorizontalSection
@@ -247,9 +341,9 @@ export default memo(function HomeScreen({
                     onShowAll={onShowAll}
                 />
 
-                {/* 2. Chill Songs - Calm & Relaxed */}
+                {/* 2. Sad Songs */}
                 <HorizontalSection
-                    title="Chill Songs"
+                    title="Sad Songs"
                     data={sections.chill}
                     currentSong={currentSong}
                     isPlaying={isPlaying}
@@ -259,7 +353,7 @@ export default memo(function HomeScreen({
                     onShowAll={onShowAll}
                 />
 
-                {/* 3. Item Songs - Party & Dance */}
+                {/* 3. Love Songs */}
                 <HorizontalSection
                     title="Love Songs"
                     data={sections.item}
@@ -271,7 +365,7 @@ export default memo(function HomeScreen({
                     onShowAll={onShowAll}
                 />
 
-                {/* 4. Melody Songs - Emotional & Expressive */}
+                {/* 4. Melody Songs */}
                 <HorizontalSection
                     title="Melody Songs"
                     data={sections.melody}
@@ -294,6 +388,23 @@ export default memo(function HomeScreen({
                     onTrackSelect={onTrackSelect}
                     onLike={onLike}
                     likedSongs={likedSongs}
+                />
+
+                {/* 6. Last.fm Recommendations based on current song */}
+                <SongRecommendations 
+                    currentTrack={currentSong} 
+                    onTrackSelect={onTrackSelect} 
+                />
+
+                {/* 7. Recently Played */}
+                <HorizontalSection
+                    title="Recently Played"
+                    data={recentSongs}
+                    currentSong={currentSong}
+                    isPlaying={isPlaying}
+                    isStartingPlayback={isStartingPlayback}
+                    startingSongId={startingSongId}
+                    onTrackSelect={onTrackSelect}
                 />
 
                 {/* Horizontal Artist Selection Menu */}

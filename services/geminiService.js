@@ -1,15 +1,8 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-// Initialize the API with the provided key
-// In a production environment, this should be in an environment variable
-const API_KEY = "AIzaSyDL_AcPvG0gYgQIbFbuQRWDx3s5VlpbiMI";
-const genAI = new GoogleGenerativeAI(API_KEY);
-
 // Cache to store results of recent queries to minimize API costs and latency
 const queryCache = new Map();
 
 /**
- * Service to interact with Google Gemini API for music recommendations
+ * Service to interact with Render AI API for music recommendations
  */
 export const GeminiService = {
     /**
@@ -37,81 +30,41 @@ export const GeminiService = {
 
         Return a list of 20 distinct song names that match this vibe, mood, or request.
 
-        OUTPUT JSON FORMAT:
-        [
-          {"track": "Song Name", "artist": "Artist"},
-          {"track": "Song Name", "artist": "Artist"},
-          ...
-        ]
+        OUTPUT FORMAT:
+        Return ONLY a flat JSON Array of strings. Example:
+        ["Song Name 1", "Song Name 2"]
 
         RULES:
-        - Return ONLY a JSON Array.
+        - Return ONLY the JSON Array.
         - Ensure strict JSON format.
         - Provide exactly 20 songs.
         - Do not include explanation text.
         `;
 
-            // 2. Use gemini-flash-latest (Stable 1.5 Flash alias)
-            const modelsToTry = ["gemini-flash-latest"];
-
+            // 2. Use the new AI endpoint
             let responseText = null;
             let lastError = null;
 
-            // Helper for delay
-            const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            try {
+                const formData = new FormData();
+                formData.append('message', promptText);
 
-            for (const modelName of modelsToTry) {
-                try {
-                    console.log(`[Gemini] Attempting with model: ${modelName}`);
-                    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${API_KEY}`;
+                const response = await fetch('https://ai-agent-v01.onrender.com/chat', {
+                    method: 'POST',
+                    body: formData
+                });
 
-                    // Retry loop for 429 errors specifically
-                    let retries = 3;
-                    while (retries > 0) {
-                        try {
-                            const response = await fetch(url, {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    contents: [{ parts: [{ text: promptText }] }]
-                                })
-                            });
-
-                            if (!response.ok) {
-                                if (response.status === 429) {
-                                    console.warn(`[Gemini] Rate limited on ${modelName}. Retrying in 3s... (Attempts left: ${retries})`);
-                                    await wait(3000 + (Math.random() * 1000)); // Jittered wait
-                                    retries--;
-                                    continue;
-                                }
-                                const errText = await response.text();
-                                throw new Error(`HTTP ${response.status}: ${errText}`);
-                            }
-
-                            const data = await response.json();
-                            if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-                                responseText = data.candidates[0].content.parts[0].text;
-                                break; // Success!
-                            } else {
-                                throw new Error("Empty response from Gemini API");
-                            }
-                        } catch (e) {
-                            if (e.message.includes("Rate Limit") || e.message.includes("429")) {
-                                if (retries <= 0) throw e;
-                                await wait(3000);
-                                retries--;
-                                continue;
-                            }
-                            throw e; // Non-retryable error
-                        }
-                    }
-                    if (responseText) break; // Break outer loop if success
-
-                } catch (e) {
-                    console.warn(`[Gemini] Failed with ${modelName}:`, e.message);
-                    lastError = e;
-                    // Continue to next model
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
                 }
+
+                const data = await response.json();
+                // Extract response based on how the API usually returns it (from test-ai.js)
+                responseText = data.message || data.reply || data.response || data.text || data.answer || data.result || JSON.stringify(data);
+
+            } catch (e) {
+                console.warn(`[Gemini] Failed to fetch from AI Agent:`, e.message);
+                lastError = e;
             }
 
             if (!responseText) {

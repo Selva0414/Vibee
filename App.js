@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   StyleSheet,
   View,
@@ -19,6 +19,7 @@ import {
   ScrollView,
   AppState
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import TrackPlayer, {
   Capability,
   State,
@@ -26,7 +27,6 @@ import TrackPlayer, {
   useProgress,
   Event
 } from 'react-native-track-player';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as SplashScreen from 'expo-splash-screen';
 import * as FileSystem from 'expo-file-system';
@@ -40,6 +40,9 @@ import LikedSongsScreen from './screens/LikedSongsScreen';
 import DownloadScreen from './screens/DownloadScreen';
 import AiScreen from './screens/AiScreen';
 import SectionScreen from './screens/SectionScreen'; // Imported
+import LoginScreen from './screens/LoginScreen';
+import SignupScreen from './screens/SignupScreen';
+import { GeminiService } from './services/geminiService';
 
 // Components
 import TabBar from './components/TabBar';
@@ -48,7 +51,6 @@ import LanguageModal from './components/LanguageModal';
 import FullScreenPlayer from './components/FullScreenPlayer';
 import ErrorBoundary from './components/ErrorBoundary';
 import SongItem from './components/SongItem';
-import { GeminiService } from './services/geminiService';
 
 import Icon from './components/Icon';
 
@@ -257,34 +259,22 @@ export default function App() {
     }
   }, []);
 
-  const fetchAiSection = useCallback(async (vibe, l = 'tamil', count = 10) => {
+  const fetchDirectSection = useCallback(async (vibe, l = 'tamil', count = 10) => {
     try {
-      const recommendations = await GeminiService.getSongRecommendations(`${vibe} songs`, l);
-      const topRecs = (recommendations || []).slice(0, count);
-      if (topRecs.length === 0) return [];
-      const batchSize = 5;
-      let allResolved = [];
-      for (let i = 0; i < topRecs.length; i += batchSize) {
-        const batch = topRecs.slice(i, i + batchSize);
-        const resolvedBatch = await Promise.all(
-          batch.map(async (rec) => {
-            try {
-              const searchQuery = `${rec.track} ${rec.artist}`;
-              const data = await fetchJsonWithRetry(
-                `${API_BASE}/search/songs?query=${encodeURIComponent(searchQuery)}&limit=1`,
-                { retries: 1, timeoutMs: 8000 }
-              );
-              const song = data?.data?.results?.[0] || data?.results?.[0] || null;
-              return song ? formatSong(song) : null;
-            } catch (err) { return null; }
-          })
-        );
-        allResolved.push(...resolvedBatch.filter(Boolean));
-        if (i + batchSize < topRecs.length) await sleep(200);
+      // Instead of Gemini, directly fetch using the query
+      const searchQuery = `${vibe} songs`;
+      const data = await fetchJsonWithRetry(
+        `${API_BASE}/search/songs?query=${encodeURIComponent(searchQuery + ' ' + l)}&limit=${count}`,
+        { retries: 1, timeoutMs: 8000 }
+      );
+
+      let raw = data?.data?.results || data?.results || data?.data || data || [];
+      if (Array.isArray(raw) && raw.length > 0) {
+        return raw.map(formatSong).filter(Boolean);
       }
-      return allResolved;
+      return [];
     } catch (e) {
-      console.warn(`[Vibee] AI section fetch failed for ${vibe}`, e);
+      console.warn(`[Vibee] Direct section fetch failed for ${vibe}`, e);
       return [];
     }
   }, []);
@@ -293,7 +283,10 @@ export default function App() {
   const [libraryView, setLibraryView] = useState('main');
   const [loading, setLoading] = useState(false);
   const [apiError, setApiError] = useState('');
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authScreen, setAuthScreen] = useState('login');
   const [likedSongs, setLikedSongs] = useState([]);
+  const [recentSongs, setRecentSongs] = useState([]);
   const [likedIds, setLikedIds] = useState(new Set());
   const [currentLanguage, setCurrentLanguage] = useState('tamil');
   const [langModalVisible, setLangModalVisible] = useState(false);
@@ -434,18 +427,15 @@ export default function App() {
       }
 
       // Check for infinite autoplay when reaching the end of the queue
-      // Using ref for isAutoplay to avoid closure bugs
-      if (isAutoplayRef.current && event.nextTrack === undefined && event.track !== undefined) {
+      if (event.nextTrack === undefined && event.track !== undefined) {
         console.log('[Vibee] Queue ended (TrackChanged), triggering infinite autoplay');
         handleInfiniteAutoplay();
       }
     });
 
     const queueEndedListener = TrackPlayer.addEventListener(Event.PlaybackQueueEnded, async (event) => {
-      if (isAutoplayRef.current) {
-        console.log('[Vibee] Queue ended (QueueEnded event), triggering infinite autoplay');
-        handleInfiniteAutoplay();
-      }
+      console.log('[Vibee] Queue ended (QueueEnded event), triggering infinite autoplay');
+      handleInfiniteAutoplay();
     });
 
     return () => {
@@ -462,12 +452,18 @@ export default function App() {
 
         // 1. Parallelize local data loading for speed
         // TrackPlayer setup is robust enough to run alongside AsyncStorage
-        const [savedLang] = await Promise.all([
+        const [savedLang, userToken] = await Promise.all([
           loadLiked(),
           loadPlaylists(),
           loadDownloadData(),
-          setupAudio()
+          loadInitialData(),
+          setupAudio(),
+          AsyncStorage.getItem('@user_token')
         ]);
+
+        if (userToken) {
+          setIsAuthenticated(true);
+        }
 
         console.log('[Vibee] Local data loaded. Starting background fetch...');
 
@@ -498,6 +494,22 @@ export default function App() {
 
     prepare();
   }, []);
+
+  const loadInitialData = async () => {
+    try {
+      const stored = await AsyncStorage.getItem('likedSongs');
+      if (stored) {
+        setLikedSongs(JSON.parse(stored));
+      }
+      
+      const recent = await AsyncStorage.getItem('recentSongs');
+      if (recent) {
+        setRecentSongs(JSON.parse(recent));
+      }
+    } catch (e) {
+      console.warn('Failed to load initial data', e);
+    }
+  };
 
   // Handle AppState changes to re-show splash on resume
   const appState = useRef(AppState.currentState);
@@ -645,14 +657,17 @@ export default function App() {
 
   const setupAudio = async () => {
     try {
-      const state = await TrackPlayer.getState().catch(() => null);
-      if (state !== null) {
-        console.log('[Vibee] TrackPlayer already setup, skipping.');
-        return;
+      // On web, checking state might not throw. Let's just try to setup and catch the specific initialization error.
+      try {
+        console.log('[Vibee] Initializing TrackPlayer...');
+        await TrackPlayer.setupPlayer();
+      } catch (e) {
+        if (e && e.code === 'player_already_initialized') {
+          console.log('[Vibee] TrackPlayer already setup, skipping.');
+        } else {
+          throw e; // throw other errors
+        }
       }
-
-      console.log('[Vibee] Initializing TrackPlayer...');
-      await TrackPlayer.setupPlayer();
       await TrackPlayer.updateOptions({
         stopWithApp: false,
         capabilities: [
@@ -713,6 +728,7 @@ export default function App() {
   const saveLiked = async (list) => {
     try {
       await AsyncStorage.setItem('@liked_songs', JSON.stringify(list));
+      await AsyncStorage.setItem('likedSongs', JSON.stringify(list));
     } catch (e) {
       console.warn('Failed to save liked songs', e);
     }
@@ -828,7 +844,7 @@ export default function App() {
 
       // --- STAGE 1: Fast Loading (Query-based) ---
       const [rTrending, rSongsForYouBase] = await Promise.all([
-        fetchSection(`${l} songs 2021,2022,2024,2023,2025`),
+        fetchSection(`${l} songs 2021,2022,2024,2023,2025,2026`),
         fetchSection(`${l} popular songs`)
       ]);
 
@@ -880,22 +896,52 @@ export default function App() {
       setLoading(false); // UI is now interactive!
 
       // --- STAGE 2: Background Loading (AI-based) ---
-      const loadAiSection = async (vibe, key) => {
-        const results = await fetchAiSection(vibe, lValue, 10);
-        if (results && results.length > 0) {
+      const loadSectionAI = async (vibe, key) => {
+        try {
+          const promptText = `10 ${vibe} songs`;
+          const songNames = await GeminiService.getSongRecommendations(promptText, lValue);
+
+          if (songNames && songNames.length > 0) {
+            const results = [];
+            for (const name of songNames.slice(0, 10)) {
+              try {
+                const searchData = await fetchJsonWithRetry(`${API_BASE}/search/songs?query=${encodeURIComponent(name + ' ' + lValue)}&limit=1`, { retries: 1 });
+                const raw = searchData?.data?.results || searchData?.results || searchData?.data || [];
+                if (Array.isArray(raw) && raw.length > 0) {
+                  const formatted = formatSong(raw[0]);
+                  if (formatted) results.push(formatted);
+                }
+              } catch (e) { }
+            }
+            if (results.length > 0) {
+              setSections(prev => {
+                const updated = { ...prev, [key]: results };
+                sectionCacheRef.current.set(lValue, updated);
+                return updated;
+              });
+              return; // Success!
+            }
+          }
+        } catch (e) {
+          console.warn(`[Vibee] Failed to fetch ${vibe} Songs via Gemini`, e);
+        }
+
+        // Fallback to direct fetch if AI fails or returns empty
+        const fallbackResults = await fetchDirectSection(vibe, lValue, 15);
+        if (fallbackResults && fallbackResults.length > 0) {
           setSections(prev => {
-            const updated = { ...prev, [key]: results };
+            const updated = { ...prev, [key]: fallbackResults };
             sectionCacheRef.current.set(lValue, updated);
             return updated;
           });
         }
       };
 
-      // Run AI calls in parallel but they update UI independently
+      // Run API calls in parallel but they update UI independently
       Promise.all([
-        loadAiSection("chill", "chill"),
-        loadAiSection("love", "item"),
-        loadAiSection("melody", "melody")
+        loadSectionAI("sad", "chill"),    // Use AI for "Sad Songs"
+        loadSectionAI("love", "item"),    // Use AI for "Love Songs"
+        loadSectionAI("melody", "melody") // Use AI for "Melody Songs"
       ]).then(async () => {
         const finalSections = sectionCacheRef.current.get(lValue);
         if (finalSections) {
@@ -932,7 +978,7 @@ export default function App() {
 
       // Pre-fetch fast sections
       const [rTrending, rSongsForYouBase] = await Promise.all([
-        fetchSection(`${l} songs 2025`, l),
+        fetchSection(`${l} songs 2025,2026`, l),
         fetchSection(`${l} popular songs`, l)
       ]);
 
@@ -1442,36 +1488,131 @@ export default function App() {
     }
   };
 
-  const handleInfiniteAutoplay = async () => {
-    if (!currentSongRef.current || !isAutoplayRef.current) return;
+  const isPreloadingRef = useRef(false);
 
+  const handleInfiniteAutoplay = async (isPreload = false) => {
+    if (!currentSongRef.current || (isStartingPlayback && !isPreload)) return;
+
+    if (isPreload) {
+      if (isPreloadingRef.current) return;
+      isPreloadingRef.current = true;
+    } else {
+      setIsStartingPlayback(true);
+      if (Platform.OS === 'android') {
+        ToastAndroid.show('Loading recommended song...', ToastAndroid.SHORT);
+      }
+    }
+
+    // Try Last.fm Recommendations first
+    try {
+      const artistName = currentSongRef.current.artist || currentSongRef.current.artists?.primary?.[0]?.name || 'Unknown Artist';
+      const lastfmRes = await fetchJsonWithRetry(`http://localhost:5000/api/recommendations/lastfm?track=${encodeURIComponent(currentSongRef.current.name)}&artist=${encodeURIComponent(artistName)}`, { retries: 1 });
+
+      if (lastfmRes && lastfmRes.length > 0) {
+        const queue = await TrackPlayer.getQueue();
+        const queuedIds = new Set(queue.map(t => t.id));
+
+        // Take top 3 recommendations to try
+        const candidates = lastfmRes.slice(0, 3);
+
+        for (const topRec of candidates) {
+          // Search for it to get streamable link
+          const searchData = await fetchJsonWithRetry(`${API_BASE}/search/songs?query=${encodeURIComponent(topRec.name + ' ' + topRec.artist)}&limit=1`, { retries: 1 });
+          const rawResult = searchData?.data?.results || searchData?.results || searchData?.data || [];
+
+          if (rawResult.length > 0) {
+            const formatted = formatSong(rawResult[0]);
+
+            // Crucial: check if this exact song ID was already played/queued
+            if (formatted && formatted.id && !queuedIds.has(formatted.id)) {
+              const track = {
+                id: formatted.id,
+                url: formatted.downloadUrl?.[0]?.url || formatted.media_url,
+                title: formatted.name,
+                artist: formatted.artists?.primary?.[0]?.name || formatted.artist || 'Unknown Artist',
+                artwork: formatted.image?.[2]?.url || formatted.image?.[1]?.url,
+                duration: formatted.duration,
+                originalSong: formatted,
+              };
+
+              if (track.url) {
+                await TrackPlayer.add([track]);
+
+                if (!isPreload) {
+                  const newQueue = await TrackPlayer.getQueue();
+                  const lastIndex = newQueue.length - 1;
+
+                  // Optimistic UI update to fix stale UI bug
+                  setCurrentSong(track.originalSong);
+                  currentSongRef.current = track.originalSong;
+
+                  await TrackPlayer.skip(lastIndex);
+                  await TrackPlayer.play();
+                  if (Platform.OS === 'android') {
+                    ToastAndroid.show(`Playing recommended: ${track.title}`, ToastAndroid.SHORT);
+                  }
+                  setIsStartingPlayback(false);
+                } else {
+                  isPreloadingRef.current = false;
+                }
+
+                return; // Successfully added a NEW Last.fm recommendation
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log("[Vibee] Last.fm autoplay failed, using default mood-based autoplay", e);
+    }
+
+    // Fallback to original mood-based logic if Last.fm fails or returns no valid new songs
     const mood = lastMoodContextRef.current || detectMood(currentSongRef.current);
     const recommendations = await fetchSimilarSongs(currentSongRef.current, mood);
 
     if (recommendations.length > 0) {
-      const tracks = recommendations.map(s => ({
-        id: s.id,
-        url: s.downloadUrl?.[0]?.url || s.media_url,
-        title: s.name,
-        artist: s.artists?.primary?.[0]?.name || s.artist || 'Unknown Artist',
-        artwork: s.image?.[2]?.url || s.image?.[1]?.url,
-        duration: s.duration,
-        originalSong: s,
-      })).filter(t => t.url);
+      const queue = await TrackPlayer.getQueue();
+      const queuedIds = new Set(queue.map(t => t.id));
+
+      const tracks = recommendations
+        .filter(s => !queuedIds.has(s.id)) // CRITICAL: Prevent playing the same song again
+        .map(s => ({
+          id: s.id,
+          url: s.downloadUrl?.[0]?.url || s.media_url,
+          title: s.name,
+          artist: s.artists?.primary?.[0]?.name || s.artist || 'Unknown Artist',
+          artwork: s.image?.[2]?.url || s.image?.[1]?.url,
+          duration: s.duration,
+          originalSong: s,
+        })).filter(t => t.url);
 
       if (tracks.length > 0) {
         await TrackPlayer.add(tracks);
-        // Play the first new song added
-        const queue = await TrackPlayer.getQueue();
-        const lastIndex = queue.length - tracks.length;
-        if (lastIndex >= 0) {
-          await TrackPlayer.skip(lastIndex);
-          await TrackPlayer.play();
-          if (Platform.OS === 'android') {
-            ToastAndroid.show('Playing recommended songs', ToastAndroid.SHORT);
+        if (!isPreload) {
+          // Play the first new song added
+          const newQueue = await TrackPlayer.getQueue();
+          const lastIndex = newQueue.length - tracks.length;
+
+          if (tracks[0]) {
+            setCurrentSong(tracks[0].originalSong);
+            currentSongRef.current = tracks[0].originalSong;
+          }
+
+          if (lastIndex >= 0) {
+            await TrackPlayer.skip(lastIndex);
+            await TrackPlayer.play();
+            if (Platform.OS === 'android') {
+              ToastAndroid.show('Playing recommended songs', ToastAndroid.SHORT);
+            }
           }
         }
       }
+    }
+
+    if (isPreload) {
+      isPreloadingRef.current = false;
+    } else {
+      setIsStartingPlayback(false);
     }
   };
 
@@ -1516,7 +1657,8 @@ export default function App() {
 
       await TrackPlayer.reset();
 
-      if (playlist && playlist.length > 0) {
+      if (playlist && playlist.length > 0 && context === 'playlist') {
+        // Only queue the full list if we explicitly play from a saved playlist or want to retain queue
         const tracks = playlist.map(s => ({
           id: s.id,
           url: getStreamUrl(s),
@@ -1532,10 +1674,10 @@ export default function App() {
         if (startIndex !== -1) {
           await TrackPlayer.skip(startIndex);
         } else if (tracks.length > 0) {
-          // If selected song is not valid, play first valid song
           await TrackPlayer.skip(0);
         }
       } else {
+        // Radio Mode: Only add the selected song so that when it finishes, infinite autoplay takes over!
         await TrackPlayer.add([{
           id: song.id,
           url: url,
@@ -1551,6 +1693,29 @@ export default function App() {
       setCurrentSong(song);
       currentSongRef.current = song;
 
+      // --- Add to Recently Played ---
+      const dateObj = new Date();
+      // Format as DD MM YYYY (e.g. 13 03 2026)
+      const formattedDate = `${String(dateObj.getDate()).padStart(2, '0')} ${String(dateObj.getMonth() + 1).padStart(2, '0')} ${dateObj.getFullYear()}`;
+      
+      const newRecentSong = {
+        ...song,
+        playedAt: formattedDate
+      };
+
+      setRecentSongs(prev => {
+        // Remove duplicates of the same song ID
+        const filtered = prev.filter(s => s.id !== song.id);
+        const updated = [newRecentSong, ...filtered].slice(0, 30); // Keep last 30
+        AsyncStorage.setItem('recentSongs', JSON.stringify(updated)).catch(() => {});
+        return updated;
+      });
+      // -----------------------------
+      
+      // Silent Preload for Radio Mode
+      if (!playlist || playlist.length === 0 || context !== 'playlist') {
+        handleInfiniteAutoplay(true);
+      }
 
     } catch (error) {
       console.error("[Vibee] Playback error:", error);
@@ -1561,6 +1726,7 @@ export default function App() {
   };
 
   const handleNext = async () => {
+    if (isStartingPlayback) return;
     try {
       const queue = await TrackPlayer.getQueue();
       const currentIndex = await TrackPlayer.getActiveTrackIndex();
@@ -1571,8 +1737,11 @@ export default function App() {
           setCurrentSong(nextTrack.originalSong);
           currentSongRef.current = nextTrack.originalSong;
         }
+        await TrackPlayer.skipToNext();
+      } else {
+        // We are at the end of the queue. Manually trigger infinite autoplay to load next recommendation!
+        await handleInfiniteAutoplay();
       }
-      await TrackPlayer.skipToNext();
     } catch (e) { }
   };
 
@@ -1612,13 +1781,6 @@ export default function App() {
     try {
       console.log(`[Vibee] Smart Search: Reaching out to Gemini for vibe: "${query}"`);
 
-      let aiMetadata = [];
-      try {
-        aiMetadata = await GeminiService.getSongRecommendations(query);
-      } catch (e) {
-        console.warn("[Vibee] Gemini retrieval failed, using fallback search logic.", e);
-      }
-
       let allFoundSongs = [];
       let bannerImage = null;
       const seenIds = new Set();
@@ -1633,45 +1795,38 @@ export default function App() {
         });
       };
 
-      // --- STAGE 1: AI Metadata Resolution (Mood Accuracy) ---
-      if (aiMetadata && aiMetadata.length > 0) {
-        console.log(`[Vibee] Gemini recommended ${aiMetadata.length} songs. Resolving tracks...`);
-        const BATCH_SIZE = 5;
-        for (let i = 0; i < aiMetadata.length; i += BATCH_SIZE) {
-          const batch = aiMetadata.slice(i, i + BATCH_SIZE);
-          const promises = batch.map(async (meta) => {
-            try {
-              const searchQuery = `${meta.track} ${meta.artist}`;
-              const searchUrl = `${API_BASE}/search/songs?query=${encodeURIComponent(searchQuery)}&limit=1`;
-              const data = await fetchJsonWithRetry(searchUrl, { retries: 1 });
-              return data?.data?.results?.[0] || data?.results?.[0] || null;
-            } catch (err) { return null; }
-          });
-          const results = await Promise.all(promises);
-          addSongs(results.filter(Boolean));
-          if (allFoundSongs.length > 0) setSmartPlaylistSongs([...allFoundSongs]);
-          await sleep(200);
+      // --- STAGE 1: Mood via Curated Playlists (Best for moods like "love", "sad", etc.) ---
+      console.log(`[Vibee] Smart Search: Searching playlists for: "${query}"`);
+      try {
+        const playlistSearchUrl = `${API_BASE}/search/playlists?query=${encodeURIComponent(query)}&limit=5`;
+        const pSearchData = await fetchJsonWithRetry(playlistSearchUrl, { retries: 1 });
+        const playlists = pSearchData?.data?.results || pSearchData?.results || [];
+
+        for (const playlist of playlists) {
+          const playlistDetailUrl = `${API_BASE}/playlists?id=${playlist.id}`;
+          const pDetailData = await fetchJsonWithRetry(playlistDetailUrl, { retries: 1 });
+          const songs = pDetailData?.data?.songs || pDetailData?.songs || [];
+          if (songs.length > 0) {
+            addSongs(songs);
+            if (!bannerImage) bannerImage = playlist.image?.[2]?.url || playlist.image?.[playlist.image.length - 1]?.link;
+          }
+          if (allFoundSongs.length >= 60) break;
         }
+      } catch (e) {
+        console.warn("[Vibee] Playlist stage failed", e);
       }
 
-      // --- STAGE 2: Mood via Curated Playlists (Fallback/Supplement) ---
+      // --- STAGE 2: Direct Song Search (Fallback for specific movie names, etc.) ---
       if (allFoundSongs.length < 10) {
+        console.log(`[Vibee] Smart Search: Falling back to direct song search for: "${query}"`);
         try {
-          const playlistSearchUrl = `${API_BASE}/search/playlists?query=${encodeURIComponent(query)}&limit=5`;
-          const pSearchData = await fetchJsonWithRetry(playlistSearchUrl, { retries: 1 });
-          const playlists = pSearchData?.data?.results || pSearchData?.results || [];
-
-          for (const playlist of playlists) {
-            const playlistDetailUrl = `${API_BASE}/playlists?id=${playlist.id}`;
-            const pDetailData = await fetchJsonWithRetry(playlistDetailUrl, { retries: 1 });
-            const songs = pDetailData?.data?.songs || pDetailData?.songs || [];
-            if (songs.length > 0) {
-              addSongs(songs);
-              if (!bannerImage) bannerImage = playlist.image?.[2]?.url || playlist.image?.[playlist.image.length - 1]?.link;
-            }
-            if (allFoundSongs.length >= 60) break;
-          }
-        } catch (e) { console.warn("[Vibee] Playlist stage failed", e); }
+          const searchUrl = `${API_BASE}/search/songs?query=${encodeURIComponent(query)}&limit=20`;
+          const data = await fetchJsonWithRetry(searchUrl, { retries: 1 });
+          const results = data?.data?.results || data?.results || [];
+          addSongs(results);
+        } catch (err) {
+          console.warn("[Vibee] Direct song search failed:", err);
+        }
       }
 
       if (allFoundSongs.length === 0) {
@@ -1874,7 +2029,7 @@ export default function App() {
 
     // Logic matching the coreQueries
     switch (title) {
-      case "Trending Songs": query = `${l} songs 2021,2022,2024,2023,2025`; break;
+      case "Trending Songs": query = `${l} trending songs 2026`; break;
       case "Chill Songs": query = `${l} songs 2020,2019,2018,2017,2016`; break;
       case "Love Songs": query = `${l} songs 2015,2014,2013,2012,2011`; break;
       case "Melody Songs": query = `${l} songs 2010,2009,2008,2007,2006`; break;
@@ -1960,8 +2115,15 @@ export default function App() {
     if (activeTab === 'home') {
       return (
         <HomeScreen
+          onLogout={async () => {
+            await AsyncStorage.removeItem('@user_token');
+            await AsyncStorage.removeItem('@user_info');
+            setIsAuthenticated(false);
+            setAuthScreen('login');
+          }}
           currentLanguage={currentLanguage}
           sections={sections}
+          recentSongs={recentSongs}
           artists={ARTISTS_BY_LANG[currentLanguage] || []}
           onArtistSelect={handleArtistSelect}
           loading={loading}
@@ -2114,488 +2276,538 @@ export default function App() {
 
           {/* Main App Content */}
           <SafeAreaView style={styles.safeArea}>
-            {/* Main Content with Fade In */}
-            {/* Main Content - Always visible behind splash */}
-            <View style={[styles.mainContent, { flex: 1 }]}>
-              {renderContent()}
-            </View>
-
-
-            {/* Artist Songs Modal - Immersive Header Style */}
-            <Modal visible={artistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setArtistModalVisible(false)}>
-              <View style={{ flex: 1, backgroundColor: '#000000' }}>
-                <View style={{ flex: 1 }}>
-                  {loadingArtistSongs ? (
-                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                      <ActivityIndicator size="large" color="#9B5DE5" />
-                      <Text style={{ color: '#9CA3AF', marginTop: 12 }}>Loading {selectedArtist}...</Text>
-                    </View>
-                  ) : (
-                    <FlatList
-                      data={artistSongs}
-                      keyExtractor={(item) => item.id}
-                      contentContainerStyle={{ paddingBottom: 150 }}
-                      ListHeaderComponent={() => (
-                        <View>
-                          {/* Large Header Section */}
-                          <ImageBackground
-                            source={{
-                              uri: (() => {
-                                if (!selectedArtistDetails?.image) return null;
-                                if (typeof selectedArtistDetails.image === 'string') {
-                                  // Hack to upgrade low-res saavn images
-                                  return selectedArtistDetails.image.replace('150x150', '500x500').replace('50x50', '500x500');
-                                }
-                                if (Array.isArray(selectedArtistDetails.image)) {
-                                  // Prefer highest resolution for header
-                                  const img = selectedArtistDetails.image.find(i => i.quality === '1000x1000') ||
-                                    selectedArtistDetails.image.find(i => i.quality === 'high') ||
-                                    selectedArtistDetails.image.find(i => i.quality === '500x500') ||
-                                    selectedArtistDetails.image[selectedArtistDetails.image.length - 1];
-                                  return img?.url || img?.link || null;
-                                }
-                                return null;
-                              })()
-                            }}
-                            style={{ width: '100%', height: 450, justifyContent: 'flex-end' }}
-                            resizeMode="cover"
-                            imageStyle={{ top: 0 }} // Align image to top to see face if cropped
-                          >
-                            <LinearGradient
-                              colors={['transparent', 'rgba(0,0,0,0.6)', '#000000']}
-                              style={{ height: '70%', padding: 24, justifyContent: 'flex-end' }}
-                            >
-                              <Text style={{ color: '#9B5DE5', fontSize: 14, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 }}>
-                                {selectedArtistDetails?.role || 'Artist'}
-                              </Text>
-                              <Text style={{
-                                color: '#FFF',
-                                fontSize: 42,
-                                fontWeight: '900',
-                                letterSpacing: -1
-                              }} numberOfLines={2}>
-                                {selectedArtist}
-                              </Text>
-                            </LinearGradient>
-
-                            {/* Back Button */}
-                            <TouchableOpacity
-                              onPress={() => setArtistModalVisible(false)}
-                              style={{
-                                position: 'absolute',
-                                top: 50,
-                                left: 20,
-                                width: 40,
-                                height: 40,
-                                borderRadius: 20,
-                                backgroundColor: 'rgba(0,0,0,0.4)',
-                                justifyContent: 'center',
-                                alignItems: 'center'
-                              }}
-                            >
-                              <Icon name="keyboard-arrow-down" size={30} color="#FFF" />
-                            </TouchableOpacity>
-                          </ImageBackground>
-
-                          {/* Quick Actions Bar */}
-                          <View style={{
-                            flexDirection: 'row',
-                            alignItems: 'center',
-                            paddingHorizontal: 20,
-                            paddingTop: 20,
-                            paddingBottom: 10
-                          }}>
-                            <TouchableOpacity
-                              onPress={() => artistSongs.length > 0 && handleArtistSongPlay(artistSongs[0])}
-                              style={{
-                                width: 56,
-                                height: 56,
-                                borderRadius: 28,
-                                backgroundColor: '#ae00ffff',
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                marginRight: 24
-                              }}
-                            >
-                              <Icon name="play-arrow" size={32} color="#000000ff" />
-                            </TouchableOpacity>
-
-                            <TouchableOpacity
-                              onPress={() => toggleFollowArtist(selectedArtist, selectedArtistDetails)}
-                              style={{
-                                paddingVertical: 8,
-                                paddingHorizontal: 16,
-                                borderRadius: 20,
-                                borderWidth: 1,
-                                borderColor: followedArtists.includes(selectedArtist) ? '#9B5DE5' : '#777',
-                                marginRight: 24
-                              }}
-                            >
-                              <Text style={{ color: followedArtists.includes(selectedArtist) ? '#9B5DE5' : '#FFF', fontWeight: 'bold' }}>
-                                {followedArtists.includes(selectedArtist) ? 'FOLLOWING' : 'FOLLOW'}
-                              </Text>
-                            </TouchableOpacity>
-
-                            <TouchableOpacity style={{ padding: 4 }}>
-                              <Icon name="more-vert" size={24} color="#B3B3B3" />
-                            </TouchableOpacity>
-                          </View>
-
-                          {/* Top Songs Title */}
-                          <View style={{ paddingHorizontal: 20, paddingTop: 10, paddingBottom: 8 }}>
-                            <Text style={{ color: '#FFF', fontSize: 20, fontWeight: 'bold' }}>Popular</Text>
-                          </View>
-                        </View>
-                      )}
-                      renderItem={({ item, index }) => (
-                        <TouchableOpacity
-                          onPress={() => handleArtistSongPlay(item)}
-                          activeOpacity={0.7}
-                          style={{
-                            flexDirection: 'row',
-                            paddingVertical: 10,
-                            paddingHorizontal: 20,
-                            alignItems: 'center'
-                          }}
-                        >
-                          <Text style={{ color: '#9CA3AF', width: 24, fontSize: 16 }}>{index + 1}</Text>
-                          <Image
-                            source={{ uri: item.image?.[1]?.url }}
-                            style={{ width: 48, height: 48, borderRadius: 4, marginHorizontal: 12 }}
-                          />
-                          <View style={{ flex: 1 }}>
-                            <Text numberOfLines={1} style={{ color: '#FFF', fontSize: 16, fontWeight: '500' }}>{item.name}</Text>
-                            <Text numberOfLines={1} style={{ color: '#9CA3AF', fontSize: 14, marginTop: 2 }}>
-                              {item.duration ? `${Math.floor(item.duration / 60)}:${(item.duration % 60).toString().padStart(2, '0')}` : ''}
-                            </Text>
-                          </View>
-                          <TouchableOpacity
-                            onPress={() => handleAddToLibraryFromArtist(item)}
-                            style={{ padding: 8 }}
-                          >
-                            <Icon name="more-horiz" size={24} color="#B3B3B3" />
-                          </TouchableOpacity>
-                        </TouchableOpacity>
-                      )}
-                      ListEmptyComponent={() => (
-                        <View style={{ flex: 1, padding: 40, alignItems: 'center' }}>
-                          <Text style={{ color: '#9CA3AF' }}>No songs found for this artist.</Text>
-                        </View>
-                      )}
-                    />
-                  )}
-                  {currentSong && !fullPlayerVisible && (
-                    <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-                      <PlayerWidget
-                        currentSong={currentSong}
-                        isPlaying={isPlaying}
-                        isStartingPlayback={isStartingPlayback}
-                        onPlayPause={() => playSong(currentSong)}
-                        onNext={handleNext}
-                        onPrev={handlePrev}
-                        progress={playbackStatus.progress}
-                        onOpenFullPlayer={() => setFullPlayerVisible(true)}
-                      />
-                    </View>
-                  )}
+            {!isAuthenticated ? (
+              authScreen === 'login' ? (
+                <LoginScreen
+                  onLoginSuccess={() => setIsAuthenticated(true)}
+                  onNavigateToSignup={() => setAuthScreen('signup')}
+                />
+              ) : (
+                <SignupScreen
+                  onSignupSuccess={() => setIsAuthenticated(true)}
+                  onNavigateToLogin={() => setAuthScreen('login')}
+                />
+              )
+            ) : (
+              <>
+                {/* Main Content with Fade In */}
+                {/* Main Content - Always visible behind splash */}
+                <View style={[styles.mainContent, { flex: 1 }]}>
+                  {renderContent()}
                 </View>
-              </View>
-            </Modal>
 
-            {/* Smart Playlist Modal - AI / Mood Results */}
-            <Modal visible={smartPlaylistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setSmartPlaylistModalVisible(false)}>
-              <View style={{ flex: 1, backgroundColor: '#000000' }}>
-                <View style={{ flex: 1 }}>
-                  {loadingSmartPlaylist ? (
-                    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-                      <ActivityIndicator size="large" color="#9B5DE5" />
-                      <Text style={{ color: '#9CA3AF', marginTop: 12 }}>Generating Playlist...</Text>
-                    </View>
-                  ) : (
-                    <FlatList
-                      data={smartPlaylistSongs}
-                      keyExtractor={(item) => item.id}
-                      contentContainerStyle={{ paddingBottom: 150 }}
-                      ListHeaderComponent={() => (
-                        <View>
-                          {/* Large Header Section */}
-                          <ImageBackground
-                            source={{ uri: smartPlaylistImage || 'https://via.placeholder.com/500/000000/FFFFFF?text=Vibee+AI' }}
-                            style={{ width: '100%', height: 400, justifyContent: 'flex-end' }}
-                            resizeMode="cover"
-                          >
-                            <LinearGradient
-                              colors={['transparent', 'rgba(0,0,0,0.8)', '#000000']}
-                              style={{ height: '80%', padding: 24, justifyContent: 'flex-end' }}
-                            >
-                              <Text style={{ color: '#9B5DE5', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4, letterSpacing: 1 }}>
-                                AI GENERATED PLAYLIST
-                              </Text>
-                              <Text style={{
-                                color: '#FFF',
-                                fontSize: 36,
-                                fontWeight: '900',
-                                letterSpacing: -1,
-                                textTransform: 'capitalize'
-                              }} numberOfLines={2}>
-                                {smartPlaylistTitle}
-                              </Text>
-                            </LinearGradient>
 
+                {/* Artist Songs Modal - Immersive Header Style */}
+                <Modal visible={artistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setArtistModalVisible(false)}>
+                  <View style={{ flex: 1, backgroundColor: '#000000' }}>
+                    <View style={{ flex: 1 }}>
+                      {loadingArtistSongs ? (
+                        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                          <ActivityIndicator size="large" color="#9B5DE5" />
+                          <Text style={{ color: '#9CA3AF', marginTop: 12 }}>Loading {selectedArtist}...</Text>
+                        </View>
+                      ) : (
+                        <FlatList
+                          data={artistSongs}
+                          keyExtractor={(item) => item.id}
+                          contentContainerStyle={{ paddingBottom: 150 }}
+                          ListHeaderComponent={() => (
+                            <View>
+                              {/* Large Header Section */}
+                              <ImageBackground
+                                source={{
+                                  uri: (() => {
+                                    if (!selectedArtistDetails?.image) return null;
+                                    if (typeof selectedArtistDetails.image === 'string') {
+                                      // Hack to upgrade low-res saavn images
+                                      return selectedArtistDetails.image.replace('150x150', '500x500').replace('50x50', '500x500');
+                                    }
+                                    if (Array.isArray(selectedArtistDetails.image)) {
+                                      // Prefer highest resolution for header
+                                      const img = selectedArtistDetails.image.find(i => i.quality === '1000x1000') ||
+                                        selectedArtistDetails.image.find(i => i.quality === 'high') ||
+                                        selectedArtistDetails.image.find(i => i.quality === '500x500') ||
+                                        selectedArtistDetails.image[selectedArtistDetails.image.length - 1];
+                                      return img?.url || img?.link || null;
+                                    }
+                                    return null;
+                                  })()
+                                }}
+                                style={{ width: '100%', height: 450, justifyContent: 'flex-end' }}
+                                resizeMode="cover"
+                                imageStyle={{ top: 0 }} // Align image to top to see face if cropped
+                              >
+                                <LinearGradient
+                                  colors={['transparent', 'rgba(0,0,0,0.6)', '#000000']}
+                                  style={{ height: '70%', padding: 24, justifyContent: 'flex-end' }}
+                                >
+                                  <Text style={{ color: '#9B5DE5', fontSize: 14, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4 }}>
+                                    {selectedArtistDetails?.role || 'Artist'}
+                                  </Text>
+                                  <Text style={{
+                                    color: '#FFF',
+                                    fontSize: 42,
+                                    fontWeight: '900',
+                                    letterSpacing: -1
+                                  }} numberOfLines={2}>
+                                    {selectedArtist}
+                                  </Text>
+                                </LinearGradient>
+
+                                {/* Back Button */}
+                                <TouchableOpacity
+                                  onPress={() => setArtistModalVisible(false)}
+                                  style={{
+                                    position: 'absolute',
+                                    top: 50,
+                                    left: 20,
+                                    width: 40,
+                                    height: 40,
+                                    borderRadius: 20,
+                                    backgroundColor: 'rgba(0,0,0,0.4)',
+                                    justifyContent: 'center',
+                                    alignItems: 'center'
+                                  }}
+                                >
+                                  <Icon name="keyboard-arrow-down" size={30} color="#FFF" />
+                                </TouchableOpacity>
+                              </ImageBackground>
+
+                              {/* Quick Actions Bar */}
+                              <View style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                paddingHorizontal: 20,
+                                paddingTop: 20,
+                                paddingBottom: 10
+                              }}>
+                                <TouchableOpacity
+                                  onPress={() => artistSongs.length > 0 && handleArtistSongPlay(artistSongs[0])}
+                                  style={{
+                                    width: 56,
+                                    height: 56,
+                                    borderRadius: 28,
+                                    backgroundColor: '#ae00ffff',
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    marginRight: 24
+                                  }}
+                                >
+                                  <Icon name="play-arrow" size={32} color="#000000ff" />
+                                </TouchableOpacity>
+
+                                <TouchableOpacity
+                                  onPress={() => toggleFollowArtist(selectedArtist, selectedArtistDetails)}
+                                  style={{
+                                    paddingVertical: 8,
+                                    paddingHorizontal: 16,
+                                    borderRadius: 20,
+                                    borderWidth: 1,
+                                    borderColor: followedArtists.includes(selectedArtist) ? '#9B5DE5' : '#777',
+                                    marginRight: 24
+                                  }}
+                                >
+                                  <Text style={{ color: followedArtists.includes(selectedArtist) ? '#9B5DE5' : '#FFF', fontWeight: 'bold' }}>
+                                    {followedArtists.includes(selectedArtist) ? 'FOLLOWING' : 'FOLLOW'}
+                                  </Text>
+                                </TouchableOpacity>
+
+                                <TouchableOpacity style={{ padding: 4 }}>
+                                  <Icon name="more-vert" size={24} color="#B3B3B3" />
+                                </TouchableOpacity>
+                              </View>
+
+                              {/* Top Songs Title */}
+                              <View style={{ paddingHorizontal: 20, paddingTop: 10, paddingBottom: 8 }}>
+                                <Text style={{ color: '#FFF', fontSize: 20, fontWeight: 'bold' }}>Popular</Text>
+                              </View>
+                            </View>
+                          )}
+                          renderItem={({ item, index }) => (
                             <TouchableOpacity
-                              onPress={() => setSmartPlaylistModalVisible(false)}
+                              onPress={() => handleArtistSongPlay(item)}
+                              activeOpacity={0.7}
                               style={{
-                                position: 'absolute',
-                                top: 50,
-                                left: 20,
-                                width: 40,
-                                height: 40,
-                                borderRadius: 20,
-                                backgroundColor: 'rgba(0,0,0,0.4)',
-                                justifyContent: 'center',
+                                flexDirection: 'row',
+                                paddingVertical: 10,
+                                paddingHorizontal: 20,
                                 alignItems: 'center'
                               }}
                             >
-                              <Icon name="keyboard-arrow-down" size={30} color="#FFF" />
+                              <Text style={{ color: '#9CA3AF', width: 24, fontSize: 16 }}>{index + 1}</Text>
+                              <Image
+                                source={{ uri: item.image?.[1]?.url }}
+                                style={{ width: 48, height: 48, borderRadius: 4, marginHorizontal: 12 }}
+                              />
+                              <View style={{ flex: 1 }}>
+                                <Text numberOfLines={1} style={{ color: '#FFF', fontSize: 16, fontWeight: '500' }}>{item.name}</Text>
+                                <Text numberOfLines={1} style={{ color: '#9CA3AF', fontSize: 14, marginTop: 2 }}>
+                                  {item.duration ? `${Math.floor(item.duration / 60)}:${(item.duration % 60).toString().padStart(2, '0')}` : ''}
+                                </Text>
+                              </View>
+                              <TouchableOpacity
+                                onPress={() => handleAddToLibraryFromArtist(item)}
+                                style={{ padding: 8 }}
+                              >
+                                <Icon name="more-horiz" size={24} color="#B3B3B3" />
+                              </TouchableOpacity>
                             </TouchableOpacity>
-                          </ImageBackground>
-
-                          {/* Play Button Row */}
-                          <View style={{ paddingHorizontal: 20, paddingTop: 20, paddingBottom: 10 }}>
-                            <TouchableOpacity
-                              onPress={() => smartPlaylistSongs.length > 0 && playSong(smartPlaylistSongs[0], smartPlaylistSongs)}
-                              style={{
-                                width: 64,
-                                height: 64,
-                                borderRadius: 32,
-                                backgroundColor: '#ae00ffff',
-                                justifyContent: 'center',
-                                alignItems: 'center',
-                                elevation: 8,
-                                shadowColor: '#ae00ffff',
-                                shadowOpacity: 0.4,
-                                shadowRadius: 10
-                              }}
-                            >
-                              <Icon name="play-arrow" size={36} color="#000" />
-                            </TouchableOpacity>
-                          </View>
-
-                          <View style={{ paddingHorizontal: 20, marginTop: 10, marginBottom: 10 }}>
-                            <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '700' }}>Songs</Text>
-                          </View>
-                        </View>
-                      )}
-                      renderItem={({ item, index }) => (
-                        <SongItem
-                          song={item}
-                          isPlaying={currentSong?.id === item.id && isPlaying}
-                          isStartingPlayback={isStartingPlayback}
-                          startingSongId={startingSongId}
-                          onPlay={(song) => playSong(song, smartPlaylistSongs)}
-                          onLike={(song) => toggleLike(song)}
-                          isLiked={likedSongs.some(s => s.id === item.id)}
-                          onAdd={() => handleAddToPlaylist(item)}
+                          )}
+                          ListEmptyComponent={() => (
+                            <View style={{ flex: 1, padding: 40, alignItems: 'center' }}>
+                              <Text style={{ color: '#9CA3AF' }}>No songs found for this artist.</Text>
+                            </View>
+                          )}
                         />
                       )}
-                      ListEmptyComponent={() => (
-                        <View style={{ flex: 1, padding: 40, alignItems: 'center' }}>
-                          <Text style={{ color: '#9CA3AF' }}>No songs found for this vibe.</Text>
+                      {currentSong && !fullPlayerVisible && (
+                        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+                          <PlayerWidget
+                            currentSong={currentSong}
+                            isPlaying={isPlaying}
+                            isStartingPlayback={isStartingPlayback}
+                            onPlayPause={() => playSong(currentSong)}
+                            onNext={handleNext}
+                            onPrev={handlePrev}
+                            progress={playbackStatus.progress}
+                            onOpenFullPlayer={() => setFullPlayerVisible(true)}
+                          />
                         </View>
                       )}
-                    />
-                  )}
-                  {currentSong && !fullPlayerVisible && (
-                    <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
-                      <PlayerWidget
-                        currentSong={currentSong}
-                        isPlaying={isPlaying}
-                        isStartingPlayback={isStartingPlayback}
-                        onPlayPause={() => playSong(currentSong)}
-                        onNext={handleNext}
-                        onPrev={handlePrev}
-                        progress={playbackStatus.progress}
-                        onOpenFullPlayer={() => setFullPlayerVisible(true)}
-                      />
                     </View>
-                  )}
-                </View>
-              </View>
-            </Modal>
-
-            {/* Playlist Selection Modal */}
-            <Modal visible={playlistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setPlaylistModalVisible(false)}>
-              <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.85)' }}>
-                <View style={{
-                  backgroundColor: '#1E1E1E',
-                  borderTopLeftRadius: 20,
-                  borderTopRightRadius: 20,
-                  padding: 20,
-                  maxHeight: '60%'
-                }}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                    <Text style={{ color: '#FFF', fontSize: 18, fontWeight: 'bold' }}>
-                      {isCreatingPlaylist ? 'New Playlist' : 'Add to Playlist'}
-                    </Text>
-                    <TouchableOpacity onPress={() => {
-                      if (isCreatingPlaylist) {
-                        setIsCreatingPlaylist(false);
-                      } else {
-                        setPlaylistModalVisible(false);
-                      }
-                    }}>
-                      <Icon name="close" size={24} color="#FFF" />
-                    </TouchableOpacity>
                   </View>
+                </Modal>
 
-                  {isCreatingPlaylist ? (
-                    <View>
-                      <TextInput
-                        value={newPlaylistName}
-                        onChangeText={setNewPlaylistName}
-                        placeholder="Playlist Name"
-                        placeholderTextColor="#9CA3AF"
-                        style={{
-                          backgroundColor: '#333',
-                          color: '#FFF',
-                          padding: 16,
-                          borderRadius: 8,
-                          marginBottom: 16,
-                          fontSize: 16,
-                          borderWidth: 1,
-                          borderColor: 'rgba(255,255,255,0.1)'
-                        }}
-                        autoFocus
-                      />
-                      <TouchableOpacity
-                        onPress={createNewPlaylistFromModal}
-                        style={{
-                          backgroundColor: '#9B5DE5',
-                          padding: 14,
-                          borderRadius: 8,
-                          alignItems: 'center',
-                          marginBottom: 12
-                        }}
-                      >
-                        <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 16 }}>Create</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        onPress={() => setIsCreatingPlaylist(false)}
-                        style={{
-                          padding: 12,
-                          alignItems: 'center'
-                        }}
-                      >
-                        <Text style={{ color: '#FFF', fontSize: 16 }}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <>
-                      <TouchableOpacity
-                        style={{
-                          flexDirection: 'row',
-                          alignItems: 'center',
-                          paddingVertical: 15,
-                          borderBottomWidth: 1,
-                          borderBottomColor: 'rgba(255,255,255,0.1)'
-                        }}
-                        onPress={() => handlePlaylistSelectForSong('create_new')}
-                      >
-                        <View style={{ width: 50, height: 50, justifyContent: 'center', alignItems: 'center', backgroundColor: '#333', borderRadius: 4 }}>
-                          <Icon name="add" size={24} color="#FFF" />
+                {/* Smart Playlist Modal - AI / Mood Results */}
+                <Modal visible={smartPlaylistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setSmartPlaylistModalVisible(false)}>
+                  <View style={{ flex: 1, backgroundColor: '#000000' }}>
+                    <View style={{ flex: 1 }}>
+                      {loadingSmartPlaylist ? (
+                        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+                          <ActivityIndicator size="large" color="#9B5DE5" />
+                          <Text style={{ color: '#9CA3AF', marginTop: 12 }}>Generating Playlist...</Text>
                         </View>
-                        <Text style={{ color: '#FFF', fontSize: 16, marginLeft: 16, fontWeight: '600' }}>Create Playlist</Text>
-                      </TouchableOpacity>
+                      ) : (
+                        <FlatList
+                          data={smartPlaylistSongs}
+                          keyExtractor={(item) => item.id}
+                          contentContainerStyle={{ paddingBottom: 150 }}
+                          ListHeaderComponent={() => (
+                            <View>
+                              {/* Large Header Section */}
+                              <ImageBackground
+                                source={{ uri: smartPlaylistImage || 'https://via.placeholder.com/500/000000/FFFFFF?text=Vibee+AI' }}
+                                style={{ width: '100%', height: 400, justifyContent: 'flex-end' }}
+                                resizeMode="cover"
+                              >
+                                <LinearGradient
+                                  colors={['transparent', 'rgba(0,0,0,0.8)', '#000000']}
+                                  style={{ height: '80%', padding: 24, justifyContent: 'flex-end' }}
+                                >
+                                  <Text style={{ color: '#9B5DE5', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', marginBottom: 4, letterSpacing: 1 }}>
+                                    AI GENERATED PLAYLIST
+                                  </Text>
+                                  <Text style={{
+                                    color: '#FFF',
+                                    fontSize: 36,
+                                    fontWeight: '900',
+                                    letterSpacing: -1,
+                                    textTransform: 'capitalize'
+                                  }} numberOfLines={2}>
+                                    {smartPlaylistTitle}
+                                  </Text>
+                                </LinearGradient>
 
-                      <FlatList
-                        data={playlists}
-                        keyExtractor={item => item.id}
-                        renderItem={({ item }) => (
+                                <TouchableOpacity
+                                  onPress={() => setSmartPlaylistModalVisible(false)}
+                                  style={{
+                                    position: 'absolute',
+                                    top: 50,
+                                    left: 20,
+                                    width: 40,
+                                    height: 40,
+                                    borderRadius: 20,
+                                    backgroundColor: 'rgba(0,0,0,0.4)',
+                                    justifyContent: 'center',
+                                    alignItems: 'center'
+                                  }}
+                                >
+                                  <Icon name="keyboard-arrow-down" size={30} color="#FFF" />
+                                </TouchableOpacity>
+                              </ImageBackground>
+
+                              {/* Play Button Row */}
+                              <View style={{ paddingHorizontal: 20, paddingTop: 20, paddingBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 20 }}>
+                                <TouchableOpacity
+                                  onPress={() => smartPlaylistSongs.length > 0 && playSong(smartPlaylistSongs[0], smartPlaylistSongs)}
+                                  style={{
+                                    width: 64,
+                                    height: 64,
+                                    borderRadius: 32,
+                                    backgroundColor: '#ae00ffff',
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    elevation: 8,
+                                    shadowColor: '#ae00ffff',
+                                    shadowOpacity: 0.4,
+                                    shadowRadius: 10
+                                  }}
+                                >
+                                  <Icon name="play-arrow" size={36} color="#000" />
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  onPress={() => {
+                                    const newPlaylist = {
+                                      id: Math.random().toString(36).substr(2, 9),
+                                      name: smartPlaylistTitle || 'AI Playlist',
+                                      songs: smartPlaylistSongs,
+                                      createdAt: new Date().toISOString()
+                                    };
+                                    const newList = [...playlists, newPlaylist];
+                                    setPlaylists(newList);
+                                    savePlaylists(newList);
+                                    if (Platform.OS === 'android') {
+                                      ToastAndroid.show('Playlist saved to library!', ToastAndroid.SHORT);
+                                    } else {
+                                      alert('Playlist saved to library!');
+                                    }
+                                  }}
+                                  style={{
+                                    width: 50,
+                                    height: 50,
+                                    borderRadius: 25,
+                                    backgroundColor: 'rgba(255,255,255,0.1)',
+                                    justifyContent: 'center',
+                                    alignItems: 'center'
+                                  }}
+                                >
+                                  <Icon name="add" size={32} color="#FFF" />
+                                </TouchableOpacity>
+                              </View>
+
+                              <View style={{ paddingHorizontal: 20, marginTop: 10, marginBottom: 10 }}>
+                                <Text style={{ color: '#FFF', fontSize: 18, fontWeight: '700' }}>Songs</Text>
+                              </View>
+                            </View>
+                          )}
+                          renderItem={({ item, index }) => (
+                            <SongItem
+                              song={item}
+                              isPlaying={currentSong?.id === item.id && isPlaying}
+                              isStartingPlayback={isStartingPlayback}
+                              startingSongId={startingSongId}
+                              onPlay={(song) => playSong(song, smartPlaylistSongs)}
+                              onLike={(song) => toggleLike(song)}
+                              isLiked={likedSongs.some(s => s.id === item.id)}
+                              onAdd={() => handleAddToPlaylist(item)}
+                            />
+                          )}
+                          ListEmptyComponent={() => (
+                            <View style={{ flex: 1, padding: 40, alignItems: 'center' }}>
+                              <Text style={{ color: '#9CA3AF' }}>No songs found for this vibe.</Text>
+                            </View>
+                          )}
+                        />
+                      )}
+                      {currentSong && !fullPlayerVisible && (
+                        <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0 }}>
+                          <PlayerWidget
+                            currentSong={currentSong}
+                            isPlaying={isPlaying}
+                            isStartingPlayback={isStartingPlayback}
+                            onPlayPause={() => playSong(currentSong)}
+                            onNext={handleNext}
+                            onPrev={handlePrev}
+                            progress={playbackStatus.progress}
+                            onOpenFullPlayer={() => setFullPlayerVisible(true)}
+                          />
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                </Modal>
+
+                {/* Playlist Selection Modal */}
+                <Modal visible={playlistModalVisible} animationType="slide" transparent={true} onRequestClose={() => setPlaylistModalVisible(false)}>
+                  <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.85)' }}>
+                    <View style={{
+                      backgroundColor: '#1E1E1E',
+                      borderTopLeftRadius: 20,
+                      borderTopRightRadius: 20,
+                      padding: 20,
+                      maxHeight: '60%'
+                    }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                        <Text style={{ color: '#FFF', fontSize: 18, fontWeight: 'bold' }}>
+                          {isCreatingPlaylist ? 'New Playlist' : 'Add to Playlist'}
+                        </Text>
+                        <TouchableOpacity onPress={() => {
+                          if (isCreatingPlaylist) {
+                            setIsCreatingPlaylist(false);
+                          } else {
+                            setPlaylistModalVisible(false);
+                          }
+                        }}>
+                          <Icon name="close" size={24} color="#FFF" />
+                        </TouchableOpacity>
+                      </View>
+
+                      {isCreatingPlaylist ? (
+                        <View>
+                          <TextInput
+                            value={newPlaylistName}
+                            onChangeText={setNewPlaylistName}
+                            placeholder="Playlist Name"
+                            placeholderTextColor="#9CA3AF"
+                            style={{
+                              backgroundColor: '#333',
+                              color: '#FFF',
+                              padding: 16,
+                              borderRadius: 8,
+                              marginBottom: 16,
+                              fontSize: 16,
+                              borderWidth: 1,
+                              borderColor: 'rgba(255,255,255,0.1)'
+                            }}
+                            autoFocus
+                          />
+                          <TouchableOpacity
+                            onPress={createNewPlaylistFromModal}
+                            style={{
+                              backgroundColor: '#9B5DE5',
+                              padding: 14,
+                              borderRadius: 8,
+                              alignItems: 'center',
+                              marginBottom: 12
+                            }}
+                          >
+                            <Text style={{ color: '#000', fontWeight: 'bold', fontSize: 16 }}>Create</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => setIsCreatingPlaylist(false)}
+                            style={{
+                              padding: 12,
+                              alignItems: 'center'
+                            }}
+                          >
+                            <Text style={{ color: '#FFF', fontSize: 16 }}>Cancel</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ) : (
+                        <>
                           <TouchableOpacity
                             style={{
                               flexDirection: 'row',
                               alignItems: 'center',
-                              paddingVertical: 12
+                              paddingVertical: 15,
+                              borderBottomWidth: 1,
+                              borderBottomColor: 'rgba(255,255,255,0.1)'
                             }}
-                            onPress={() => handlePlaylistSelectForSong(item.id)}
+                            onPress={() => handlePlaylistSelectForSong('create_new')}
                           >
-                            <View style={{ width: 50, height: 50, justifyContent: 'center', alignItems: 'center', backgroundColor: '#282828', borderRadius: 4 }}>
-                              <Icon name="music-note" size={20} color="#666" />
+                            <View style={{ width: 50, height: 50, justifyContent: 'center', alignItems: 'center', backgroundColor: '#333', borderRadius: 4 }}>
+                              <Icon name="add" size={24} color="#FFF" />
                             </View>
-                            <View style={{ marginLeft: 16, flex: 1 }}>
-                              <Text style={{ color: '#FFF', fontSize: 16 }}>{item.name}</Text>
-                              <Text style={{ color: '#9CA3AF', fontSize: 13 }}>{item.songs.length} songs</Text>
-                            </View>
-                            {item.songs.some(s => s.id === selectedSongForPlaylist?.id) && (
-                              <Icon name="check-circle" size={20} color="#9B5DE5" />
-                            )}
+                            <Text style={{ color: '#FFF', fontSize: 16, marginLeft: 16, fontWeight: '600' }}>Create Playlist</Text>
                           </TouchableOpacity>
-                        )}
-                      />
-                    </>
-                  )}
-                </View>
-              </View>
-            </Modal>
 
-            {currentSong && (
-              <PlayerWidget
-                currentSong={currentSong}
-                isPlaying={isPlaying}
-                onPlayPause={() => playSong(currentSong)}
-                onNext={handleNext}
-                onPrev={handlePrev}
-                progress={playbackStatus.progress}
-                onOpenFullPlayer={() => setFullPlayerVisible(true)}
-              />
+                          <FlatList
+                            data={playlists}
+                            keyExtractor={item => item.id}
+                            renderItem={({ item }) => (
+                              <TouchableOpacity
+                                style={{
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  paddingVertical: 12
+                                }}
+                                onPress={() => handlePlaylistSelectForSong(item.id)}
+                              >
+                                <View style={{ width: 50, height: 50, justifyContent: 'center', alignItems: 'center', backgroundColor: '#282828', borderRadius: 4 }}>
+                                  <Icon name="music-note" size={20} color="#666" />
+                                </View>
+                                <View style={{ marginLeft: 16, flex: 1 }}>
+                                  <Text style={{ color: '#FFF', fontSize: 16 }}>{item.name}</Text>
+                                  <Text style={{ color: '#9CA3AF', fontSize: 13 }}>{item.songs.length} songs</Text>
+                                </View>
+                                {item.songs.some(s => s.id === selectedSongForPlaylist?.id) && (
+                                  <Icon name="check-circle" size={20} color="#9B5DE5" />
+                                )}
+                              </TouchableOpacity>
+                            )}
+                          />
+                        </>
+                      )}
+                    </View>
+                  </View>
+                </Modal>
+
+                {currentSong && (
+                  <PlayerWidget
+                    currentSong={currentSong}
+                    isPlaying={isPlaying}
+                    onPlayPause={() => playSong(currentSong)}
+                    onNext={handleNext}
+                    onPrev={handlePrev}
+                    progress={playbackStatus.progress}
+                    onOpenFullPlayer={() => setFullPlayerVisible(true)}
+                  />
+                )}
+
+                <TabBar activeTab={activeTab} onTabChange={handleTabChange} />
+
+                <LanguageModal
+                  visible={langModalVisible}
+                  onClose={() => setLangModalVisible(false)}
+                  onSelect={handleLanguageSelect}
+                  currentLanguage={currentLanguage}
+                />
+
+                <FullScreenPlayer
+                  visible={fullPlayerVisible}
+                  onClose={() => setFullPlayerVisible(false)}
+                  isLyricsVisible={isLyricsVisible}
+                  setIsLyricsVisible={setIsLyricsVisible}
+                  currentSong={currentSong}
+                  isPlaying={isPlaying}
+                  isStartingPlayback={isStartingPlayback}
+                  onPlayPause={() => playSong(currentSong)}
+                  onLike={toggleLike}
+                  isLiked={likedSongs.some(s => s.id === currentSong?.id)}
+                  onNext={handleNext}
+                  onPrev={handlePrev}
+                  onFetchLyrics={fetchLyrics}
+                  playlists={playlists}
+                  onAddToPlaylist={addSongToPlaylist}
+                  followedArtists={followedArtists}
+                  onToggleFollow={toggleFollowArtist}
+                  playbackStatus={playbackStatus}
+                  onSeek={handleSeek}
+                  isShuffle={isShuffle}
+                  onToggleShuffle={() => setIsShuffle(!isShuffle)}
+                  isRepeat={isRepeat}
+                  onToggleRepeat={() => setIsRepeat(!isRepeat)}
+                  isAutoplay={isAutoplay}
+                  onToggleAutoplay={async () => {
+                    const newValue = !isAutoplay;
+                    setIsAutoplay(newValue);
+                    await AsyncStorage.setItem('@is_autoplay', JSON.stringify(newValue));
+                  }}
+                  sleepTimer={sleepTimer}
+                  sleepTimerActive={sleepTimerActive}
+                  onSetSleepTimer={handleSetSleepTimer}
+                  downloadFolders={downloadFolders}
+                  onDownload={(folderId) => downloadSong(currentSong, folderId)}
+                  onAddToDownloadFolder={addSongToDownloadFolder}
+                  onLogout={async () => {
+                    await AsyncStorage.removeItem('@user_token');
+                    await AsyncStorage.removeItem('@user_info');
+                    setIsAuthenticated(false);
+                    setAuthScreen('login');
+                  }}
+                />
+              </>
             )}
-
-            <TabBar activeTab={activeTab} onTabChange={handleTabChange} />
-
-            <LanguageModal
-              visible={langModalVisible}
-              onClose={() => setLangModalVisible(false)}
-              onSelect={handleLanguageSelect}
-              currentLanguage={currentLanguage}
-            />
-
-            <FullScreenPlayer
-              visible={fullPlayerVisible}
-              onClose={() => setFullPlayerVisible(false)}
-              isLyricsVisible={isLyricsVisible}
-              setIsLyricsVisible={setIsLyricsVisible}
-              currentSong={currentSong}
-              isPlaying={isPlaying}
-              isStartingPlayback={isStartingPlayback}
-              onPlayPause={() => playSong(currentSong)}
-              onLike={toggleLike}
-              isLiked={likedSongs.some(s => s.id === currentSong?.id)}
-              onNext={handleNext}
-              onPrev={handlePrev}
-              onFetchLyrics={fetchLyrics}
-              playlists={playlists}
-              onAddToPlaylist={addSongToPlaylist}
-              followedArtists={followedArtists}
-              onToggleFollow={toggleFollowArtist}
-              playbackStatus={playbackStatus}
-              onSeek={handleSeek}
-              isShuffle={isShuffle}
-              onToggleShuffle={() => setIsShuffle(!isShuffle)}
-              isRepeat={isRepeat}
-              onToggleRepeat={() => setIsRepeat(!isRepeat)}
-              isAutoplay={isAutoplay}
-              onToggleAutoplay={async () => {
-                const newValue = !isAutoplay;
-                setIsAutoplay(newValue);
-                await AsyncStorage.setItem('@is_autoplay', JSON.stringify(newValue));
-              }}
-              sleepTimer={sleepTimer}
-              sleepTimerActive={sleepTimerActive}
-              onSetSleepTimer={handleSetSleepTimer}
-              downloadFolders={downloadFolders}
-              onDownload={(folderId) => downloadSong(currentSong, folderId)}
-              onAddToDownloadFolder={addSongToDownloadFolder}
-            />
           </SafeAreaView>
         </LinearGradient>
       </ErrorBoundary>

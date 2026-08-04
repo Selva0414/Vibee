@@ -18,10 +18,7 @@ export default function GenreCard({ song, isPlaying, isStartingPlayback = false,
             disabled={isStartingPlayback}
             activeOpacity={0.7}
         >
-            <LinearGradient
-                colors={['rgba(255,255,255,0.1)', 'rgba(255,255,255,0.05)']}
-                style={styles.container}
-            >
+            <View style={styles.container}>
                 <View style={styles.imageContainer}>
                     <Image
                         source={{ uri: song.image?.[2]?.url || song.image?.[1]?.url || song.image?.[0]?.url }}
@@ -52,9 +49,9 @@ export default function GenreCard({ song, isPlaying, isStartingPlayback = false,
                 </View>
                 <Text numberOfLines={1} style={styles.title}>{song.name}</Text>
                 <Text numberOfLines={1} style={styles.description}>
-                    {song.artists?.primary?.[0]?.name || 'Various Artists'}
+                    {song.playedAt ? song.playedAt : (song.artists?.primary?.[0]?.name || 'Various Artists')}
                 </Text>
-            </LinearGradient>
+            </View>
         </TouchableOpacity>
     );
 }
@@ -66,10 +63,6 @@ const styles = StyleSheet.create({
         marginBottom: 16,
     },
     container: {
-        padding: 8,
-        borderRadius: 12,
-        borderWidth: 1,
-        borderColor: 'rgba(255,255,255,0.1)',
         width: '100%',
     },
     imageContainer: {
